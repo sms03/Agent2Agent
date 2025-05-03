@@ -19,4 +19,4 @@ Sample agent which can generate images. Showcases multi-turn interactions and se
 Sample agent which can parse a file and then chat with the user using the parsed content as context. Showcases multi-turn interactions, file upload and parsing, and streaming updates. 
 
 * [**Enterprise Data Agent**](/samples/python/agents/mindsdb/README.md)  
-Sample agent which can answer questions from any database, datawarehouse, app. - Powered by Gemini 2.5 flash + MindsDB.
+Sample agent which can answer questions from any database, datawarehouse, app. - With Gemini 2.5 flash + MindsDB.
