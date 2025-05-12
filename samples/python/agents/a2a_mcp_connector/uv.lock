@@ -24,6 +24,7 @@ dependencies = [
     { name = "sse-starlette" },
     { name = "starlette" },
     { name = "typing-extensions" },
+    { name = "uuid" },
     { name = "uvicorn" },
 ]
 
@@ -42,6 +43,7 @@ requires-dist = [
     { name = "sse-starlette", specifier = ">=2.2.1" },
     { name = "starlette", specifier = ">=0.46.1" },
     { name = "typing-extensions", specifier = ">=4.12.2" },
+    { name = "uuid", specifier = ">=1.30" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 
@@ -1275,6 +1277,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/8a/78/16493d9c386d8e60e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6b/11/cc635220681e93a0183390e26485430ca2c7b5f9d33b15c74c2861cb8091/urllib3-2.4.0-py3-none-any.whl", hash = "sha256:4e16665048960a0900c702d4a66415956a584919c03361cac9f1df5c5dd7e813", size = 128680, upload_time = "2025-04-10T15:23:37.377Z" },
 ]
+
+[[package]]
+name = "uuid"
+version = "1.30"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/63/f42f5aa951ebf2c8dac81f77a8edcc1c218640a2a35a03b9ff2d4aa64c3d/uuid-1.30.tar.gz", hash = "sha256:1f87cc004ac5120466f36c5beae48b4c48cc411968eed0eaecd3da82aa96193f", size = 5811, upload_time = "2007-05-26T11:13:24Z" }
 
 [[package]]
 name = "uvicorn"

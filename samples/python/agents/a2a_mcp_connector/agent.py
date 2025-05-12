@@ -10,6 +10,8 @@ import logging
 import requests
 import os
 import sys
+import time
+import uuid
 from typing import Any, AsyncIterable, Dict, List, Optional
 
 # Add the parent directory to the Python path for imports
@@ -23,6 +25,12 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from base_agent import AgentWithTaskManager
+from jsonrpc_utils import (
+    create_jsonrpc_request,
+    parse_jsonrpc_response,
+    JsonRpcError,
+    INTERNAL_ERROR
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -73,13 +81,34 @@ def register_mcp_tool(tool_id: str, tool_url: str, tool_description: str) -> Dic
     if not tool_url.startswith(("http://", "https://")):
         return {"status": "error", "message": f"Invalid URL format: {tool_url}. URL must start with http:// or https://"}
     
-    # Try to validate the MCP endpoint (optional but helpful)
+    # Try to validate the MCP endpoint with a JSON-RPC ping
     try:
-        # In a production implementation, we might check capabilities or validate the MCP service
-        # For this example, we'll just check if the URL is reachable
-        response = requests.head(tool_url, timeout=5)
+        # Send a simple JSON-RPC ping to validate the endpoint
+        ping_request = create_jsonrpc_request(
+            method="ping",
+            params={},
+            request_id="registration-ping"
+        )
+        
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(tool_url, json=ping_request, headers=headers, timeout=5)
+        
+        # Check if we got a valid JSON-RPC response (success or error both okay)
         if response.status_code >= 400:
-            logger.warning(f"MCP tool URL returned status code {response.status_code}: {tool_url}")
+            logger.warning(f"MCP tool URL returned HTTP status code {response.status_code}: {tool_url}")
+        else:
+            try:
+                # Parse as JSON - both success and error responses are valid at this stage
+                json_response = response.json()
+                if "jsonrpc" not in json_response or json_response["jsonrpc"] != "2.0":
+                    logger.warning(f"MCP tool URL doesn't seem to support JSON-RPC 2.0: {tool_url}")
+                elif json_response.get("id") != "registration-ping":
+                    logger.warning(f"MCP tool URL response had unexpected ID: {json_response.get('id')}")
+                else:
+                    # Valid response - either "result" or "error" is fine for validation
+                    logger.info(f"Validated MCP tool URL with JSON-RPC ping: {tool_url}")
+            except json.JSONDecodeError:
+                logger.warning(f"MCP tool URL didn't return valid JSON: {tool_url}")
     except Exception as e:
         logger.warning(f"Could not validate MCP tool URL: {e}")
     
@@ -109,7 +138,7 @@ def list_mcp_tools() -> Dict[str, Any]:
 
 def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> Dict[str, Any]:
     """
-    Call an MCP tool with the given input data.
+    Call an MCP tool with the given input data using the JSON-RPC protocol.
     
     Args:
         tool_id (str): The ID of the MCP tool to call
@@ -128,20 +157,32 @@ def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> D
     tool_context.actions.thinking(f"Calling MCP tool: {tool_id} at {tool_info['url']}")
     
     # Parse input data - could be JSON string or plain text
-    data_to_send = input_data
-    if input_data.strip().startswith('{'):
-        try:
-            data_to_send = json.loads(input_data)
-        except json.JSONDecodeError:
-            # Not valid JSON, use as plain text
-            pass
+    try:
+        if input_data.strip().startswith('{'):
+            parsed_input = json.loads(input_data)
+        else:
+            # Plain text becomes the 'text' field in parameters
+            parsed_input = {"text": input_data}
+    except json.JSONDecodeError:
+        # Not valid JSON, use as plain text
+        parsed_input = {"text": input_data}
+    
+    # Create a unique request ID
+    request_id = f"{tool_id}-{uuid.uuid4()}"
+    
+    # Create a proper JSON-RPC 2.0 request
+    jsonrpc_request = create_jsonrpc_request(
+        method="execute",  # Standard method name for MCP tool execution
+        params=parsed_input,
+        request_id=request_id
+    )
     
     try:
-        # Make the actual request to the MCP service
+        # Make the request to the MCP service using JSON-RPC protocol
         headers = {"Content-Type": "application/json"}
         response = requests.post(
             tool_info['url'],
-            json={"input": data_to_send},
+            json=jsonrpc_request,
             headers=headers,
             timeout=30
         )
@@ -149,29 +190,47 @@ def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> D
         # Log the response status
         logger.info(f"MCP tool {tool_id} returned status code {response.status_code}")
         
-        # Handle successful response
+        # Handle successful HTTP response (note: might still contain a JSON-RPC error)
         if response.status_code < 400:
             try:
-                result = response.json()
+                # Parse and validate the JSON-RPC response
+                result = parse_jsonrpc_response(response.text, request_id)
+                
+                # If we get here, the response is valid and contains a result
                 return {
                     "status": "success",
                     "tool_id": tool_id,
                     "result": result
                 }
-            except json.JSONDecodeError:
-                # If not JSON, return the text
+            except JsonRpcError as e:
+                # Handle JSON-RPC error
                 return {
-                    "status": "success",
+                    "status": "error",
                     "tool_id": tool_id,
-                    "result": response.text
+                    "message": f"MCP tool returned JSON-RPC error: {e.message}",
+                    "code": e.code,
+                    "details": e.data
+                }
+            except json.JSONDecodeError:
+                # Response is not valid JSON
+                return {
+                    "status": "error",
+                    "tool_id": tool_id,
+                    "message": "MCP tool returned invalid JSON",
+                    "details": response.text
                 }
         else:
-            # Handle error response
+            # Handle HTTP error response
+            try:
+                error_details = response.json()
+            except json.JSONDecodeError:
+                error_details = response.text
+                
             return {
                 "status": "error",
                 "tool_id": tool_id,
-                "message": f"MCP tool returned error code {response.status_code}",
-                "details": response.text
+                "message": f"MCP tool returned HTTP error code {response.status_code}",
+                "details": error_details
             }
     except Exception as e:
         logger.error(f"Error calling MCP tool: {e}")
@@ -271,11 +330,11 @@ class A2AMCPConnectorAgent(AgentWithTaskManager):
             - A standardized way for AI agents to communicate with each other
             - Provides a common interface for agent discovery and task delegation
             - Enables interoperability between different agent frameworks and vendors
-            
-            MCP (Model Context Protocol):
+              MCP (Model Context Protocol):
             - A protocol for structuring tool interactions with AI models
             - Allows models to call external tools and use their results
             - Standardizes the format for tool inputs and outputs
+            - Uses JSON-RPC 2.0 for communication between models and tools
             
             In your role, you bridge these protocols by:
             1. Exposing an A2A interface for other agents to communicate with you
