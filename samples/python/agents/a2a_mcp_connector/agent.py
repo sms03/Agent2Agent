@@ -25,12 +25,23 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from base_agent import AgentWithTaskManager
-from jsonrpc_utils import (
-    create_jsonrpc_request,
-    parse_jsonrpc_response,
-    JsonRpcError,
-    INTERNAL_ERROR
-)
+
+# Import MCP client libraries for different transport mechanisms
+try:
+    from mcp.client.sse import sse_client, SseServerParameters
+    from mcp.client.stdio import stdio_client, StdioServerParameters
+    from mcp.client.jsonrpc import ClientSession
+    HAS_MCP_CLIENTS = True
+except ImportError:
+    logging.warning("MCP client libraries not found. Using fallback JSON-RPC implementation.")
+    HAS_MCP_CLIENTS = False
+    # Fallback to our custom JSON-RPC implementation
+    from jsonrpc_utils import (
+        create_jsonrpc_request,
+        parse_jsonrpc_response,
+        JsonRpcError,
+        INTERNAL_ERROR
+    )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -62,14 +73,16 @@ def save_registry():
     except Exception as e:
         logger.error(f"Error saving MCP tool registry: {e}")
 
-def register_mcp_tool(tool_id: str, tool_url: str, tool_description: str) -> Dict[str, Any]:
+def register_mcp_tool(tool_id: str, tool_url: str, tool_description: str, transport_type: str = "jsonrpc", **kwargs) -> Dict[str, Any]:
     """
     Register an MCP tool with the connector.
     
     Args:
         tool_id (str): Unique identifier for the MCP tool
-        tool_url (str): URL endpoint for the MCP tool
+        tool_url (str): URL endpoint for the MCP tool or server
         tool_description (str): Description of what the tool does
+        transport_type (str): The transport mechanism to use ("jsonrpc", "sse", "stdio")
+        **kwargs: Additional parameters for specific transport types
         
     Returns:
         Dict[str, Any]: Registration status and tool information
@@ -77,50 +90,67 @@ def register_mcp_tool(tool_id: str, tool_url: str, tool_description: str) -> Dic
     if tool_id in mcp_tools:
         return {"status": "already_exists", "message": f"Tool '{tool_id}' is already registered"}
     
-    # Validate the URL format
-    if not tool_url.startswith(("http://", "https://")):
-        return {"status": "error", "message": f"Invalid URL format: {tool_url}. URL must start with http:// or https://"}
-    
-    # Try to validate the MCP endpoint with a JSON-RPC ping
-    try:
-        # Send a simple JSON-RPC ping to validate the endpoint
-        ping_request = create_jsonrpc_request(
-            method="ping",
-            params={},
-            request_id="registration-ping"
-        )
+    # Validate based on transport type
+    if transport_type == "jsonrpc" or transport_type == "sse":
+        # For HTTP-based transports, validate URL format
+        if not tool_url.startswith(("http://", "https://")):
+            return {"status": "error", "message": f"Invalid URL format: {tool_url}. URL must start with http:// or https://"}
         
-        headers = {"Content-Type": "application/json"}
-        response = requests.post(tool_url, json=ping_request, headers=headers, timeout=5)
-        
-        # Check if we got a valid JSON-RPC response (success or error both okay)
-        if response.status_code >= 400:
-            logger.warning(f"MCP tool URL returned HTTP status code {response.status_code}: {tool_url}")
-        else:
+        # For direct JSON-RPC, try to validate with a ping
+        if transport_type == "jsonrpc" and not HAS_MCP_CLIENTS:
             try:
-                # Parse as JSON - both success and error responses are valid at this stage
-                json_response = response.json()
-                if "jsonrpc" not in json_response or json_response["jsonrpc"] != "2.0":
-                    logger.warning(f"MCP tool URL doesn't seem to support JSON-RPC 2.0: {tool_url}")
-                elif json_response.get("id") != "registration-ping":
-                    logger.warning(f"MCP tool URL response had unexpected ID: {json_response.get('id')}")
+                # Send a simple JSON-RPC ping to validate the endpoint
+                ping_request = create_jsonrpc_request(
+                    method="ping",
+                    params={},
+                    request_id="registration-ping"
+                )
+                
+                headers = {"Content-Type": "application/json"}
+                response = requests.post(tool_url, json=ping_request, headers=headers, timeout=5)
+                
+                # Check if we got a valid JSON-RPC response (success or error both okay)
+                if response.status_code >= 400:
+                    logger.warning(f"MCP tool URL returned HTTP status code {response.status_code}: {tool_url}")
                 else:
-                    # Valid response - either "result" or "error" is fine for validation
-                    logger.info(f"Validated MCP tool URL with JSON-RPC ping: {tool_url}")
-            except json.JSONDecodeError:
-                logger.warning(f"MCP tool URL didn't return valid JSON: {tool_url}")
-    except Exception as e:
-        logger.warning(f"Could not validate MCP tool URL: {e}")
+                    try:
+                        # Parse as JSON - both success and error responses are valid at this stage
+                        json_response = response.json()
+                        if "jsonrpc" not in json_response or json_response["jsonrpc"] != "2.0":
+                            logger.warning(f"MCP tool URL doesn't seem to support JSON-RPC 2.0: {tool_url}")
+                        elif json_response.get("id") != "registration-ping":
+                            logger.warning(f"MCP tool URL response had unexpected ID: {json_response.get('id')}")
+                        else:
+                            # Valid response - either "result" or "error" is fine for validation
+                            logger.info(f"Validated MCP tool URL with JSON-RPC ping: {tool_url}")
+                    except json.JSONDecodeError:
+                        logger.warning(f"MCP tool URL didn't return valid JSON: {tool_url}")
+            except Exception as e:
+                logger.warning(f"Could not validate MCP tool URL: {e}")
+    elif transport_type == "stdio":
+        # For STDIO, ensure we have a command specified
+        command = kwargs.get("command", "")
+        if not command:
+            return {"status": "error", "message": "STDIO transport requires a 'command' parameter"}
+            
+        # Store command and arguments in tool_url for consistency
+        tool_url = f"stdio://{command}"
+    else:
+        return {"status": "error", "message": f"Unsupported transport type: {transport_type}"}
     
+    # Create the tool info record with all relevant parameters
     tool_info = {
         "id": tool_id,
         "url": tool_url,
         "description": tool_description,
-        "status": "registered"
+        "transport_type": transport_type,
+        "status": "registered",
+        # Store any additional transport-specific parameters
+        **kwargs
     }
     
     mcp_tools[tool_id] = tool_info
-    logger.info(f"Registered MCP tool: {tool_id} at {tool_url}")
+    logger.info(f"Registered MCP tool: {tool_id} using {transport_type} transport")
     
     # Save the updated registry
     save_registry()
@@ -138,7 +168,7 @@ def list_mcp_tools() -> Dict[str, Any]:
 
 def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> Dict[str, Any]:
     """
-    Call an MCP tool with the given input data using the JSON-RPC protocol.
+    Call an MCP tool with the given input data using the MCP protocol.
     
     Args:
         tool_id (str): The ID of the MCP tool to call
@@ -154,7 +184,7 @@ def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> D
     tool_info = mcp_tools[tool_id]
     
     # Let the user know we're processing
-    tool_context.actions.thinking(f"Calling MCP tool: {tool_id} at {tool_info['url']}")
+    tool_context.actions.thinking(f"Calling MCP tool: {tool_id} using {tool_info.get('transport_type', 'jsonrpc')} transport")
     
     # Parse input data - could be JSON string or plain text
     try:
@@ -167,6 +197,37 @@ def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> D
         # Not valid JSON, use as plain text
         parsed_input = {"text": input_data}
     
+    # Handle based on transport type and availability of MCP clients
+    transport_type = tool_info.get('transport_type', 'jsonrpc')
+    
+    if HAS_MCP_CLIENTS and transport_type in ['sse', 'stdio']:
+        # For async transport types that need async/await, we need special handling
+        import asyncio
+        
+        try:
+            if transport_type == 'sse':
+                # Run the async function and wait for the result
+                result = asyncio.run(call_mcp_tool_sse(tool_id, parsed_input, tool_info))
+                return result
+            elif transport_type == 'stdio':
+                # Run the async function and wait for the result
+                result = asyncio.run(call_mcp_tool_stdio(tool_id, parsed_input, tool_info))
+                return result
+        except Exception as e:
+            logger.error(f"Error running async MCP tool call: {e}")
+            return {
+                "status": "error",
+                "tool_id": tool_id,
+                "message": f"Error running async MCP tool call: {str(e)}"
+            }
+    
+    # Default to direct JSON-RPC implementation for all other cases
+    return call_mcp_tool_jsonrpc(tool_id, parsed_input, tool_info)
+
+def call_mcp_tool_jsonrpc(tool_id: str, parsed_input: Dict[str, Any], tool_info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Call an MCP tool using direct JSON-RPC over HTTP.
+    """
     # Create a unique request ID
     request_id = f"{tool_id}-{uuid.uuid4()}"
     
@@ -240,6 +301,104 @@ def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> D
             "message": f"Error calling MCP tool: {str(e)}"
         }
 
+async def call_mcp_tool_sse(tool_id: str, parsed_input: Dict[str, Any], tool_info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Call an MCP tool using SSE (Server-Sent Events) transport.
+    """
+    if not HAS_MCP_CLIENTS:
+        return call_mcp_tool_jsonrpc(tool_id, parsed_input, tool_info)
+    
+    try:
+        # Parse server parameters from tool_info
+        server_params = SseServerParameters(
+            base_url=tool_info['url'],
+        )
+        
+        # Collect results from the SSE stream
+        result = {}
+        
+        # Connect to the MCP server using SSE client
+        async with sse_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                # Initialize the connection
+                await session.initialize()
+                
+                # Use tools/list to get available tools
+                tools_result = await session.call_method("tools/list", {})
+                logger.info(f"Available tools on MCP server: {tools_result}")
+                
+                # Execute the target tool if it exists
+                exec_result = await session.call_method("tools/execute", {
+                    "name": tool_id,
+                    "input": parsed_input
+                })
+                
+                # Store the execution result
+                result = exec_result.get("output", {})
+        
+        return {
+            "status": "success",
+            "tool_id": tool_id,
+            "result": result
+        }
+    except Exception as e:
+        logger.error(f"Error in SSE MCP tool call: {e}")
+        return {
+            "status": "error",
+            "tool_id": tool_id,
+            "message": f"Error in SSE MCP tool call: {str(e)}"
+        }
+
+async def call_mcp_tool_stdio(tool_id: str, parsed_input: Dict[str, Any], tool_info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Call an MCP tool using STDIO transport.
+    """
+    if not HAS_MCP_CLIENTS:
+        return call_mcp_tool_jsonrpc(tool_id, parsed_input, tool_info)
+    
+    try:
+        # Parse server parameters from tool_info
+        command = tool_info.get('command', tool_id)
+        
+        server_params = StdioServerParameters(
+            command=command,
+            args=tool_info.get('args', []),
+        )
+        
+        # Collect results from the STDIO connection
+        result = {}
+        
+        # Connect to the MCP server using STDIO client
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                # Initialize the connection
+                await session.initialize()
+                
+                # Use tools/list to get available tools
+                tools_result = await session.call_method("tools/list", {})
+                logger.info(f"Available tools on MCP server: {tools_result}")
+                
+                # Execute the target tool if it exists
+                exec_result = await session.call_method("tools/execute", {
+                    "name": tool_id,
+                    "input": parsed_input
+                })
+                
+                # Store the execution result
+                result = exec_result.get("output", {})
+        
+        return {
+            "status": "success",
+            "tool_id": tool_id,
+            "result": result
+        }
+    except Exception as e:
+        logger.error(f"Error in STDIO MCP tool call: {e}")
+        return {
+            "status": "error",
+            "tool_id": tool_id,
+            "message": f"Error in STDIO MCP tool call: {str(e)}"
+        }
 
 def remove_mcp_tool(tool_id: str) -> Dict[str, Any]:
     """
@@ -293,20 +452,28 @@ class A2AMCPConnectorAgent(AgentWithTaskManager):
             description=(
                 "A connector agent that bridges A2A and MCP protocols, "
                 "allowing easy registration and interaction with MCP tools."
-            ),
-            instruction="""
+            ),            instruction="""
             You are an A2A-MCP Connector Agent, designed to make it easy for users to register and interact with 
             MCP (Model Context Protocol) tools through the A2A (Agent-to-Agent) protocol.
             
             You can help users with the following tasks:
             
-            1. Register MCP tools by providing a tool ID, URL, and description using register_mcp_tool()
+            1. Register MCP tools by providing:
+                - tool_id: Unique identifier for the tool
+                - tool_url: URL endpoint for the tool or MCP server
+                - tool_description: What the tool does
+                - transport_type: How to communicate with the tool/server ("jsonrpc", "sse", or "stdio")
+                - Additional parameters depending on transport type
+            
             2. List all registered MCP tools using list_mcp_tools()
+            
             3. Call MCP tools with specific input data using call_mcp_tool()
+            
             4. Remove MCP tools using remove_mcp_tool()
             
             When a user requests to register a new MCP tool:
-            - Ask for the tool ID, URL, and description if not provided
+            - Ask for the tool ID, URL, description, and transport type if not provided
+            - For STDIO transport, ask for the command to execute
             - Use register_mcp_tool() to register the tool
             - Confirm the successful registration
             
@@ -330,15 +497,19 @@ class A2AMCPConnectorAgent(AgentWithTaskManager):
             - A standardized way for AI agents to communicate with each other
             - Provides a common interface for agent discovery and task delegation
             - Enables interoperability between different agent frameworks and vendors
-              MCP (Model Context Protocol):
+            
+            MCP (Model Context Protocol):
             - A protocol for structuring tool interactions with AI models
             - Allows models to call external tools and use their results
             - Standardizes the format for tool inputs and outputs
-            - Uses JSON-RPC 2.0 for communication between models and tools
+            - Can use different transport mechanisms:
+                - JSON-RPC: Direct HTTP-based communication
+                - SSE: Server-Sent Events for streaming responses
+                - STDIO: Standard input/output for local tools
             
             In your role, you bridge these protocols by:
             1. Exposing an A2A interface for other agents to communicate with you
-            2. Managing connections to MCP-compatible tools
+            2. Managing connections to MCP-compatible tools and servers
             3. Simplifying the process of discovering and using MCP tools
             """,
             tools=[
