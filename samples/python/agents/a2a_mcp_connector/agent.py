@@ -1,14 +1,14 @@
 """
 A2A-MCP Connector Agent implementation.
 
-This agent serves as a bridge between A2A (Agent-to-Agent) protocol and MCP (Model Context Protocol),
-providing an intuitive interface for connecting to and using MCP tools through A2A.
+Hey there! This agent bridges A2A (Agent-to-Agent) protocol with MCP (Model Context Protocol).
+It gives you a nice, clean interface for hooking up MCP tools through the A2A protocol.
 
-The agent properly implements MCP client functionality by:
-1. Maintaining persistent connections to MCP servers
-2. Correctly distinguishing between MCP servers and the tools they provide
-3. Using official MCP client libraries when available
-4. Accurately representing the relationship between A2A and MCP in an agent system
+In a nutshell, this agent:
+1. Keeps persistent connections to MCP servers (no reconnecting for every tool call!)
+2. Knows the difference between MCP servers and the tools they provide
+3. Uses the official MCP client libraries when it can find them
+4. Represents the A2A-MCP relationship the way it should be
 """
 
 import json
@@ -16,13 +16,12 @@ import logging
 import asyncio
 import os
 import sys
-import time
-import uuid
-from typing import Any, AsyncIterable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Add the parent directory to the Python path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
+# Google ADK imports - these handle the agent functionality
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.tools.tool_context import ToolContext
 from google.adk.artifacts import InMemoryArtifactService
@@ -30,62 +29,63 @@ from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+# Import our base agent that handles the A2A task management
 from base_agent import AgentWithTaskManager
 
-# Import our MCP Connection Manager for proper MCP server management
+# Here's where the magic happens - our MCP connection manager
 from mcp_connection_manager import MCPConnectionManager
 
-# Configure logging
+# Set up some basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create MCP connection manager for server and tool management
+# Fire up our connection manager - this is what keeps track of all our MCP servers
 mcp_manager = MCPConnectionManager()
 
-# Optional path to save MCP server registry
+# Where should we save our server registry? Check env vars first, fall back to default
 REGISTRY_PATH = os.getenv("MCP_REGISTRY_PATH", "mcp_servers_registry.json")
 
 def load_registry():
-    """Load the MCP server registry from disk if available."""
+    """Try to load our saved MCP servers from disk."""
     mcp_manager.set_registry_path(REGISTRY_PATH)
     if mcp_manager.load_registry():
-        logger.info(f"Loaded MCP server registry from {REGISTRY_PATH}")
+        logger.info(f"Found and loaded server registry from {REGISTRY_PATH}")
     else:
-        logger.info(f"No MCP server registry found at {REGISTRY_PATH} or failed to load")
+        logger.info(f"No registry found at {REGISTRY_PATH} - we'll create a new one when needed")
 
 def save_registry():
-    """Save the MCP server registry to disk."""
+    """Save our MCP server registry to disk so we don't lose it."""
     if mcp_manager.save_registry():
-        logger.info(f"Saved MCP server registry to {REGISTRY_PATH}")
+        logger.info(f"Saved all our MCP servers to {REGISTRY_PATH}")
     else:
-        logger.error(f"Failed to save MCP server registry to {REGISTRY_PATH}")
+        logger.error(f"Dang, couldn't save the registry to {REGISTRY_PATH}")
 
 async def register_mcp_server(server_id: str, server_url: str, server_description: str, transport_type: str = "jsonrpc", **kwargs) -> Dict[str, Any]:
     """
-    Register an MCP server with the connector.
+    Register a new MCP server with our connector.
     
     Args:
-        server_id (str): Unique identifier for the MCP server
-        server_url (str): URL endpoint for the MCP server
-        server_description (str): Description of what the server does
-        transport_type (str): The transport mechanism to use ("jsonrpc", "sse", "stdio")
-        **kwargs: Additional parameters for specific transport types
+        server_id: What we'll call this server (like "weather-api" or "google-search")
+        server_url: Where to find the server (URL or path)
+        server_description: What this server does, in plain English
+        transport_type: How to talk to it ("jsonrpc", "sse", or "stdio")
+        **kwargs: Any extra params the specific transport needs
         
     Returns:
-        Dict[str, Any]: Registration status and server information
+        Dict with status and server info (or error message if it failed)
     """
-    # Validate URL format for HTTP-based transports
+    # Check the URL format for HTTP-based servers
     if transport_type in ["jsonrpc", "sse"]:
         if not server_url.startswith(("http://", "https://")):
-            return {"status": "error", "message": f"Invalid URL format: {server_url}. URL must start with http:// or https://"}
-    
-    # For STDIO transport, ensure we have a command
+            return {"status": "error", "message": f"That URL ({server_url}) doesn't look right. Need http:// or https://"}
+      # For STDIO transport, we need a command to run
     if transport_type == "stdio":
         command = kwargs.get("command", "")
         if not command:
-            return {"status": "error", "message": "STDIO transport requires a 'command' parameter"}
+            return {"status": "error", "message": "For STDIO transport, I need a 'command' parameter"}
     
-    # Use the connection manager to register the server
+    # Let the connection manager handle the registration
     result = await mcp_manager.register_server(
         server_id=server_id,
         server_url=server_url,
@@ -98,62 +98,63 @@ async def register_mcp_server(server_id: str, server_url: str, server_descriptio
 
 def list_mcp_servers() -> Dict[str, Any]:
     """
-    List all registered MCP servers.
+    Get a list of all the MCP servers we have registered.
     
     Returns:
-        Dict[str, Any]: Dictionary containing all registered servers
+        Dict with all our registered servers
     """
     return mcp_manager.list_servers()
 
 def list_mcp_tools() -> Dict[str, Any]:
     """
-    List all available MCP tools across all servers.
+    Get a list of all available MCP tools across all servers.
     
     Returns:
-        Dict[str, Any]: Dictionary containing all available tools
+        Dict with all available tools
     """
     return mcp_manager.list_tools()
 
 async def call_mcp_tool(tool_id: str, input_data: str, tool_context: ToolContext) -> Dict[str, Any]:
     """
-    Call an MCP tool with the given input data.
+    Call an MCP tool and get the results back.
     
     Args:
-        tool_id (str): The ID of the MCP tool to call
-        input_data (str): The input data for the MCP tool (JSON string or plain text)
-        tool_context (ToolContext): The context in which the tool operates
+        tool_id: Which tool to call (must be a registered tool ID)
+        input_data: What to send to the tool (JSON or plain text)
+        tool_context: Execution context for tracking progress
         
     Returns:
-        Dict[str, Any]: Results from the MCP tool call
+        Dict with the tool's response
     """
-    # Let the user know we're processing
+    # Let the user know we're working on it
     tool_context.actions.thinking(f"Calling MCP tool: {tool_id}")
     
-    # Parse input data - could be JSON string or plain text
+    # Figure out if input is JSON or plain text
     try:
         if input_data.strip().startswith('{'):
+            # Looks like JSON, let's parse it
             parsed_input = json.loads(input_data)
         else:
-            # Plain text becomes the 'text' field in parameters
+            # Just regular text - we'll wrap it in a 'text' field
             parsed_input = {"text": input_data}
     except json.JSONDecodeError:
-        # Not valid JSON, use as plain text
+        # JSON parsing blew up - just treat it as plain text
         parsed_input = {"text": input_data}
     
-    # Execute the tool using the connection manager
+    # Hand it off to our connection manager to do the actual work
     result = await mcp_manager.execute_tool(tool_id, parsed_input)
     
     return result
 
 async def remove_mcp_server(server_id: str) -> Dict[str, Any]:
     """
-    Remove a registered MCP server.
+    Kick a server off our registry.
     
     Args:
-        server_id (str): The ID of the MCP server to remove
+        server_id: The ID of the server to remove
         
     Returns:
-        Dict[str, Any]: Removal status
+        Dict with removal status
     """
     result = await mcp_manager.remove_server(server_id)
     
@@ -161,13 +162,13 @@ async def remove_mcp_server(server_id: str) -> Dict[str, Any]:
 
 async def remove_mcp_tool(tool_id: str) -> Dict[str, Any]:
     """
-    Remove a registered MCP tool.
+    Remove a tool from our available tools list.
     
     Args:
-        tool_id (str): The ID of the MCP tool to remove
+        tool_id: The ID of the tool to remove
         
     Returns:
-        Dict[str, Any]: Removal status
+        Dict with removal status
     """
     result = await mcp_manager.remove_tool(tool_id)
     
@@ -175,12 +176,11 @@ async def remove_mcp_tool(tool_id: str) -> Dict[str, Any]:
 
 
 class A2AMCPConnectorAgent(AgentWithTaskManager):
-    """An agent that connects A2A and MCP protocols with an intuitive interface."""
+    """The main agent that bridges A2A with MCP - giving you all the tools!"""
 
-    SUPPORTED_CONTENT_TYPES = ["text", "text/plain", "application/json"]
-
+    SUPPORTED_CONTENT_TYPES = ["text", "text/plain", "application/json"]   
     def __init__(self):
-        # Load any existing MCP server registry
+        # Let's load any servers we saved previously
         load_registry()
         
         self._agent = self._build_agent()
@@ -195,97 +195,95 @@ class A2AMCPConnectorAgent(AgentWithTaskManager):
         
     async def cleanup(self):
         """
-        Clean up resources when the agent is shutting down.
-        Ensures all MCP server connections are properly closed.
+        Clean up all our resources when shutting down.
+        Makes sure we don't leave any dangling connections.
         """
-        logger.info("Cleaning up A2A-MCP Connector Agent resources...")
+        logger.info("Cleaning up A2A-MCP Connector Agent...")
         try:
-            # Close all server connections
+            # Close all our connections to MCP servers
             await mcp_manager.close_all_connections()
-            logger.info("Successfully closed all MCP server connections")
+            logger.info("All MCP connections closed cleanly")
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+            logger.error(f"Ugh, ran into a problem during cleanup: {e}")
             
     async def __aenter__(self):
         """Support for async context manager."""
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Ensure cleanup is called when used as async context manager."""
+        """Clean up when exiting the context manager."""
         await self.cleanup()
 
     def get_processing_message(self) -> str:
-        """Message displayed while processing user request."""
-        return "Processing your request with the A2A-MCP connector..."
+        """What to show users while we're working."""
+        return "Working on your request with A2A-MCP connector..."
 
     def _build_agent(self) -> LlmAgent:
-        """Builds the LLM agent for the A2A-MCP connector."""
+        """Set up our LLM agent with all the right settings."""
         return LlmAgent(
             model="gemini-2.0-flash-001",
             name="a2a_mcp_connector",
             description=(
-                "A connector agent that bridges A2A and MCP protocols, "
-                "allowing easy registration and interaction with MCP servers and tools."
+                "A friendly connector that bridges A2A and MCP protocols, "
+                "making it super easy to use MCP servers and tools."
             ),            
             instruction="""
-            You are an A2A-MCP Connector Agent, designed to make it easy for users to register and interact with 
-            MCP (Model Context Protocol) servers and tools through the A2A (Agent-to-Agent) protocol.
+            Hey there! You're an A2A-MCP Connector Agent, here to help users connect to and use 
+            MCP (Model Context Protocol) servers and tools through A2A.
             
-            You can help users with the following tasks:
+            You can help folks with:
             
-            1. Register MCP servers by providing:
-                - server_id: Unique identifier for the server
-                - server_url: URL endpoint for the server
-                - server_description: What the server does
-                - transport_type: How to communicate with the server ("jsonrpc", "sse", or "stdio")
-                - Additional parameters depending on transport type
+            1. Setting up MCP servers by asking for:
+                - server_id: What to call this server (like "weather-api")
+                - server_url: Where to find it (URL or path)
+                - server_description: What it does, in plain language
+                - transport_type: How to talk to it ("jsonrpc", "sse", or "stdio")                - Extra parameters that might be needed based on transport type
             
-            2. List all registered MCP servers using list_mcp_servers()
+            2. Getting a list of all the servers you've set up with list_mcp_servers()
             
-            3. List all available MCP tools across all servers using list_mcp_tools()
+            3. Seeing all the tools you can use across all servers with list_mcp_tools()
             
-            4. Call MCP tools with specific input data using call_mcp_tool()
+            4. Using any MCP tool by calling call_mcp_tool() with your input
             
-            5. Remove MCP servers using remove_mcp_server()
+            5. Removing servers you don't need anymore with remove_mcp_server()
             
-            6. Remove specific MCP tools using remove_mcp_tool()
+            6. Removing specific tools with remove_mcp_tool()
             
-            When a user requests to register a new MCP server:
-            - Ask for the server ID, URL, description, and transport type if not provided
-            - For STDIO transport, ask for the command to execute
-            - Use register_mcp_server() to register the server
-            - Confirm the successful registration
+            When someone wants to add a new MCP server:
+            - Ask for what they want to call it, where it is, what it does, and how to talk to it
+            - For STDIO servers, make sure to get the command to run
+            - Use register_mcp_server() to set everything up
+            - Let them know if it worked or not
             
-            When a user asks to use or call an MCP tool:
-            - Check if the tool is available using list_mcp_tools()
-            - If not available, suggest registering the appropriate server first
-            - If available, use call_mcp_tool() to invoke the tool with the user's input
-            - Return the results to the user
+            When someone wants to use an MCP tool:
+            - Check if we have that tool registered
+            - If not, suggest they register the right server first
+            - If we have it, use call_mcp_tool() to run it with their input
+            - Show them what the tool returned
             
-            Always be helpful and explain the steps involved in working with MCP servers and tools.
-            Provide clear instructions for how to use the available functions.
+            Be friendly and walk people through how everything works - no jargon!
+            Keep it simple and explain what each function does in plain English.
             
-            IMPORTANT CONCEPTS TO EXPLAIN IF ASKED:
-            
-            A2A (Agent-to-Agent) Protocol:
-            - A standardized way for AI agents to communicate with each other
-            - Provides a common interface for agent discovery and task delegation
-            - Enables interoperability between different agent frameworks and vendors
+            KEY CONCEPTS TO EXPLAIN (if they ask):
+              A2A (Agent-to-Agent) Protocol:
+            - Think of this as a common language that lets AI assistants talk to each other
+            - It's like a shared playbook for how agents can discover each other and hand off tasks
+            - Makes it possible for agents from different companies and systems to work together
             
             MCP (Model Context Protocol):
-            - A protocol for structuring tool interactions with AI models
-            - Allows models to call external tools and use their results
-            - Standardizes the format for tool inputs and outputs
-            - Tools are provided by MCP servers that can use different transport mechanisms:
-                - JSON-RPC: Direct HTTP-based communication
-                - SSE: Server-Sent Events for streaming responses
-                - STDIO: Standard input/output for local tools
+            - A way to structure how tools work with AI models
+            - Lets models reach out to external tools and use what they return
+            - Makes tool inputs and outputs follow a consistent pattern
+            - Tools come from MCP servers that can communicate in different ways:
+                - JSON-RPC: Web-based back-and-forth (most common)
+                - SSE: For when the server needs to stream results bit by bit
+                - STDIO: For running local tools on your machine
             
-            In your role, you bridge these protocols by:
-            1. Exposing an A2A interface for other agents to communicate with you
-            2. Managing persistent connections to MCP-compatible servers
-            3. Simplifying the process of discovering and using MCP tools
-            4. Properly handling connection lifecycle and error cases
+            Your job is to connect these worlds by:
+            1. Speaking A2A so other agents can talk to you
+            2. Keeping solid connections to MCP servers so tools are always ready
+            3. Making it dead simple to find and use MCP tools
+            4. Handling all the boring connection stuff and error cases
             """,
             tools=[
                 register_mcp_server,
@@ -299,7 +297,7 @@ class A2AMCPConnectorAgent(AgentWithTaskManager):
 
 
 async def main():
-    """Run the agent as a standalone A2A task manager."""
+    """Start up the agent as a standalone task manager."""
     from common.task_manager import run_task_manager
     from common.types import TaskManagerCapabilities
     
@@ -314,9 +312,9 @@ async def main():
             ),
         )
     finally:
-        # Ensure connections are properly closed on shutdown
+        # Make sure we clean up our connections when shutting down
         await agent.cleanup()
 
 if __name__ == "__main__":
-    # Run the A2A-MCP connector agent
+    # Fire up the A2A-MCP connector agent
     asyncio.run(main())

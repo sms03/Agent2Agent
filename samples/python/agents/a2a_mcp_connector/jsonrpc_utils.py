@@ -1,13 +1,14 @@
 """
 JSON-RPC utilities for MCP connector.
 
-This module provides helper functions for working with JSON-RPC in MCP tools.
+A bunch of helpful functions for working with JSON-RPC in our MCP connector.
+This is our fallback implementation when the official libraries aren't available.
 """
 
 import json
 from typing import Any, Dict, Optional, Union
 
-# Standard JSON-RPC error codes
+# Standard error codes from the JSON-RPC spec
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
@@ -17,7 +18,7 @@ SERVER_ERROR_START = -32000
 SERVER_ERROR_END = -32099
 
 class JsonRpcError(Exception):
-    """Exception raised for JSON-RPC errors."""
+    """When JSON-RPC calls go wrong."""
     
     def __init__(self, code: int, message: str, data: Any = None):
         self.code = code
@@ -26,7 +27,7 @@ class JsonRpcError(Exception):
         super().__init__(f"JSON-RPC error {code}: {message}")
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert error to a JSON-RPC error object."""
+        """Turn this error into a proper JSON-RPC error object."""
         error = {
             "code": self.code,
             "message": self.message
@@ -40,17 +41,17 @@ def create_jsonrpc_request(method: str, params: Any, request_id: str = None) -> 
     Create a JSON-RPC 2.0 request object.
     
     Args:
-        method: The method to call
-        params: The parameters for the method call
-        request_id: Optional request ID (will be generated if None)
+        method: What method to call
+        params: Any parameters to pass to the method
+        request_id: ID to track this request (we'll make one if you don't)
         
     Returns:
-        A JSON-RPC request object
+        A JSON-RPC request object, ready to send
     """
     import time
     import uuid
     
-    # Generate a unique ID if not provided
+    # Need an ID? No problem, we'll make one
     if request_id is None:
         request_id = f"{uuid.uuid4()}-{int(time.time())}"
     
@@ -63,14 +64,14 @@ def create_jsonrpc_request(method: str, params: Any, request_id: str = None) -> 
 
 def create_jsonrpc_response(result: Any, request_id: str) -> Dict[str, Any]:
     """
-    Create a JSON-RPC 2.0 success response object.
+    Create a JSON-RPC 2.0 success response.
     
     Args:
-        result: The result of the method call
-        request_id: The request ID to match
+        result: What the method returned
+        request_id: ID from the request we're responding to
         
     Returns:
-        A JSON-RPC response object
+        A proper JSON-RPC response
     """
     return {
         "jsonrpc": "2.0",
@@ -85,16 +86,16 @@ def create_jsonrpc_error_response(
     request_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Create a JSON-RPC 2.0 error response object.
+    Create a JSON-RPC 2.0 error response when things go wrong.
     
     Args:
-        error_code: The error code
-        error_message: The error message
-        error_data: Optional error data
-        request_id: The request ID to match (or None if unknown)
+        error_code: Numeric code for this error type
+        error_message: Human-readable explanation
+        error_data: Any extra details about the error (optional)
+        request_id: ID from the original request, if we know it
         
     Returns:
-        A JSON-RPC error response object
+        A properly formatted JSON-RPC error response
     """
     error = {
         "code": error_code,
@@ -114,72 +115,72 @@ def parse_jsonrpc_response(
     expected_id: Optional[str] = None
 ) -> Union[Dict[str, Any], JsonRpcError]:
     """
-    Parse a JSON-RPC response and validate it.
+    Parse and validate a JSON-RPC response.
     
     Args:
-        response_text: The response text to parse
-        expected_id: Optional expected request ID
+        response_text: The raw response string to parse
+        expected_id: ID we're expecting in the response (for validation)
         
     Returns:
-        The parsed response result or raises JsonRpcError
+        The parsed result or raises an exception if something's wrong
         
     Raises:
-        JsonRpcError: If the response is not valid or contains an error
+        JsonRpcError: If the response is invalid or contains an error
     """
     try:
         response = json.loads(response_text)
     except json.JSONDecodeError:
         raise JsonRpcError(
             PARSE_ERROR, 
-            "Response is not valid JSON",
+            "Oops, couldn't parse the JSON response",
             response_text
         )
-    
-    # Validate the response structure
+      # Make sure we got a proper object back
     if not isinstance(response, dict):
         raise JsonRpcError(
             INVALID_REQUEST, 
-            "Response is not a JSON object",
+            "This doesn't look like a proper JSON-RPC response object",
             response
         )
     
+    # Check for JSON-RPC 2.0 version marker
     if response.get("jsonrpc") != "2.0":
         raise JsonRpcError(
             INVALID_REQUEST, 
-            "Response is missing 'jsonrpc': '2.0' field",
+            "Missing the 'jsonrpc': '2.0' field - not a valid JSON-RPC response",
             response
         )
     
-    # Check for matching ID if expected_id is provided
+    # Make sure the ID matches what we're expecting
     if expected_id is not None and response.get("id") != expected_id:
         raise JsonRpcError(
             INVALID_REQUEST, 
-            f"Response ID '{response.get('id')}' does not match request ID '{expected_id}'",
+            f"ID mismatch! Got '{response.get('id')}' but expected '{expected_id}'",
             response
         )
-    
-    # Check for error response
+      # See if we got an error back
     if "error" in response:
         error = response["error"]
         if not isinstance(error, dict):
             raise JsonRpcError(
                 INTERNAL_ERROR,
-                "Error field is not an object",
+                "The error field isn't formatted right",
                 response
             )
         
         code = error.get("code", INTERNAL_ERROR)
-        message = error.get("message", "Unknown error")
+        message = error.get("message", "Something went wrong but the server didn't say what")
         data = error.get("data")
         
         raise JsonRpcError(code, message, data)
     
-    # Check for result
+    # Make sure we at least got a result
     if "result" not in response:
         raise JsonRpcError(
             INVALID_REQUEST,
-            "Response is missing both 'result' and 'error' fields",
+            "This response doesn't have either a 'result' or an 'error' - what gives?",
             response
         )
     
+    # All good! Return the result
     return response["result"]

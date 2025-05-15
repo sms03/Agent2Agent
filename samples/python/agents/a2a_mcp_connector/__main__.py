@@ -17,7 +17,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 from common.server import A2AServer
 from common.types import AgentCard, AgentCapabilities, AgentSkill, MissingAPIKeyError
 from agent import A2AMCPConnectorAgent
-from task_manager import AgentTaskManager
 
 # Load environment variables
 load_dotenv()
@@ -87,14 +86,13 @@ def main(host, port):
             capabilities=capabilities,
             skills=[register_skill, list_skill, call_skill],
         )
-        
-        # Create the agent instance
+          # Create the agent instance
         agent = A2AMCPConnectorAgent()
         
         # Create and start the A2A server
         server = A2AServer(
             agent_card=agent_card,
-            task_manager=AgentTaskManager(agent=agent),
+            task_manager=agent,  # The agent itself implements the task manager interface
             host=host,
             port=port,
         )
